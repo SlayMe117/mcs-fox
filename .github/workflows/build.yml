@@ -4,6 +4,9 @@ on:
   push:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -33,9 +36,20 @@ jobs:
       - name: Build debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
-      - name: Upload APK
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk mcs-fox.apk
+
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: mcs-fox-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          path: mcs-fox.apk
           if-no-files-found: error
+
+      - name: Publish APK to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Последняя сборка MCS Fox
+          body: Отладочный APK, собран автоматически из main.
+          files: mcs-fox.apk
