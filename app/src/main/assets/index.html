@@ -11,7 +11,7 @@
     --num:#3da9fc; --bool:#46c08a; --enum:#c07ae0;
   }
   *{box-sizing:border-box}
-  html,body{margin:0;height:100%}
+  html,body{margin:0;height:100%;overflow-x:hidden;max-width:100%}
   body{background:var(--bg);color:var(--text);
     font:15px/1.4 -apple-system,Roboto,"Segoe UI",sans-serif;display:flex;flex-direction:column}
   header{padding:12px 16px;background:var(--panel);border-bottom:1px solid var(--line);
@@ -39,10 +39,10 @@
   #status{padding:7px 16px;font-size:13px;color:var(--muted);min-height:18px}
   #status.ok{color:var(--ok)} #status.err{color:var(--err)}
 
-  #list{flex:1;overflow:auto;padding:4px 0 28px}
-  .grp{color:var(--muted);font-size:11px;letter-spacing:.4px;padding:12px 16px 4px;
-    text-transform:uppercase;border-top:1px solid var(--line)}
-  .pt{display:flex;align-items:center;gap:10px;padding:9px 16px;border-bottom:1px solid #1b232d}
+  #list{flex:1;overflow-y:auto;overflow-x:hidden;padding:4px 0 28px}
+  .grp{color:var(--muted);font-size:12px;padding:12px 16px 4px;
+    word-break:break-word;border-top:1px solid var(--line)}
+  .pt{display:flex;align-items:center;gap:10px;padding:9px 16px;border-bottom:1px solid #1b232d;max-width:100%}
   .badge{font-size:10px;font-weight:700;text-transform:uppercase;padding:2px 6px;border-radius:5px;
     letter-spacing:.3px;flex-shrink:0;width:28px;text-align:center}
   .b-numeric{background:rgba(61,169,252,.16);color:var(--num)}
@@ -51,7 +51,9 @@
   .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .ro{color:var(--muted);font-size:10px;margin-left:6px}
   .val{background:var(--chip);border:1px solid var(--line);border-radius:7px;padding:5px 10px;
-    font-variant-numeric:tabular-nums;font-size:14px;min-width:54px;text-align:center}
+    font-variant-numeric:tabular-nums;font-size:14px;min-width:54px;max-width:42vw;text-align:center;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex-shrink:0}
+  select.val{max-width:46vw;-webkit-appearance:none;appearance:none}
   .val.wr{border-color:#2f4a63;color:var(--accent)}
   .val.pending{opacity:.5}
   .toggle{width:46px;height:26px;border-radius:14px;background:#2a3542;position:relative;flex-shrink:0}
@@ -96,7 +98,7 @@
   <button class="mini" id="live" onclick="toggleLive()">● онлайн</button>
   <button class="mini" onclick="refresh()">Обновить</button>
 </div>
-<div class="note" id="note" style="display:none">Запись значений (set) — бета, проверяйте на безопасных точках.</div>
+<div class="note" id="note" style="display:none">Нажмите на значение writable-точки, чтобы изменить его.</div>
 
 <div id="list"></div>
 
@@ -131,6 +133,26 @@ function refresh(){ const d=parseInt($('depth').value)||6; CUR_DEPTH=d; setStatu
 
 function setStatus(t,cls){ const s=$('status'); s.textContent=t; s.className=cls||''; }
 const clean = v => v ? String(v).split(' {')[0].trim() : '—';
+function decodeU(s){ return String(s).replace(/\$u([0-9a-fA-F]{4})/g,(m,h)=>String.fromCharCode(parseInt(h,16))).replace(/\$([0-9a-fA-F]{2})/g,(m,h)=>String.fromCharCode(parseInt(h,16))); }
+// enum приходит как "1@{Авто=0,Вкл=1,...}" — вытащить текущую метку и список вариантов
+function parseEnum(v){
+  v=String(v==null?'':v);
+  const at=v.indexOf('@{');
+  if(at<0) return {ord:null,label:clean(v),options:[]};
+  const ord=(v.slice(0,at).match(/-?\d+/)||[''])[0];
+  const end=v.lastIndexOf('}'); const body=v.slice(at+2, end>at?end:v.length);
+  const options=[];
+  for(const part of body.split(',')){
+    const eq=part.lastIndexOf('='); if(eq<0) continue;
+    const name=decodeU(part.slice(0,eq).trim());
+    const o=(part.slice(eq+1).match(/-?\d+/)||[''])[0];
+    if(o!=='') options.push({ord:o,label:name});
+  }
+  const f=options.find(x=>x.ord===ord);
+  return {ord,label:f?f.label:(ord||clean(v)),options};
+}
+const NOISE=new Set(['points','Points','Out','out']);
+const cleanPath = path => String(path||'').split(' / ').filter(s=>s && !NOISE.has(s)).join(' / ');
 
 // вход прошёл — показываем шапку и список сразу, точки ещё сканируются
 window.onConnected = function(js){
@@ -172,10 +194,13 @@ function updateValues(map){
     const row=document.querySelector('.pt[data-handle="'+p.handle+'"]'); if(!row) continue;
     if(row.querySelector('.edit')||row.querySelector('.pending')) continue;
     const ctrl=row.lastChild;
-    if(ctrl.classList && ctrl.classList.contains('toggle')){
+    if(ctrl===document.activeElement) continue;           // не трогаем открытый список/фокус
+    if(ctrl.tagName==='SELECT'){
+      const pe=parseEnum(nv); if(pe.ord!=null) ctrl.value=pe.ord;
+    } else if(ctrl.classList && ctrl.classList.contains('toggle')){
       ctrl.classList.toggle('on', /true|on|1|вкл/i.test(clean(nv)));
     } else if(ctrl.classList && ctrl.classList.contains('val')){
-      ctrl.textContent=clean(nv);
+      ctrl.textContent = p.kind==='enum' ? parseEnum(nv).label : clean(nv);
     }
   }
 }
@@ -191,7 +216,7 @@ function render(pts){
   const groups={};
   for(const p of pts){ (groups[p.path]=groups[p.path]||[]).push(p); }
   for(const path of Object.keys(groups).sort()){
-    const g=document.createElement('div'); g.className='grp'; g.textContent=path||'/'; list.appendChild(g);
+    const g=document.createElement('div'); g.className='grp'; g.textContent=cleanPath(path)||'/'; list.appendChild(g);
     for(const p of groups[path]) list.appendChild(rowFor(p));
   }
 }
@@ -215,6 +240,17 @@ function control(p){
     t.onclick=()=>{ const nv=!t.classList.contains('on'); t.classList.add('pending');
       Fox.setValue(p.handle,'boolean',nv?'true':'false'); };
     return t;
+  }
+  if(p.kind==='enum'){
+    const pe=parseEnum(p.value);
+    if(p.writable && pe.options.length){
+      const sel=document.createElement('select'); sel.className='val wr';
+      for(const o of pe.options){ const opt=document.createElement('option');
+        opt.value=o.ord; opt.textContent=o.label; if(o.ord===pe.ord) opt.selected=true; sel.appendChild(opt); }
+      sel.onchange=()=>{ sel.classList.add('pending'); Fox.setValue(p.handle,'enum',sel.value); };
+      return sel;
+    }
+    const v=document.createElement('span'); v.className='val'; v.textContent=pe.label; return v;
   }
   const v=document.createElement('span'); v.className='val'+(p.writable?' wr':''); v.textContent=clean(p.value);
   if(p.writable){ v.onclick=()=>openEdit(v,p); }
