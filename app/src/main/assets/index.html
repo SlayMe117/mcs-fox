@@ -84,7 +84,7 @@
   <div class="row">
     <div class="f"><label>Пользователь</label><input id="user" autocapitalize="off" autocorrect="off"></div>
     <div class="f"><label>Пароль</label><input id="pass" type="password"></div>
-    <div class="f" style="flex:.5"><label>Глубина</label><input id="depth" value="8" inputmode="numeric"></div>
+    <div class="f" style="flex:.5"><label>Глубина</label><input id="depth" value="6" inputmode="numeric"></div>
   </div>
   <button id="go" onclick="connect()">Подключиться</button>
 </div>
@@ -122,14 +122,28 @@ function refresh(){ const d=parseInt($('depth').value)||8; setStatus('Обнов
 function setStatus(t,cls){ const s=$('status'); s.textContent=t; s.className=cls||''; }
 const clean = v => v ? String(v).split(' {')[0].trim() : '—';
 
+// вход прошёл — показываем шапку и список сразу, точки ещё сканируются
+window.onConnected = function(js){
+  let r; try{ r=JSON.parse(js);}catch(e){ return; }
+  if(!r.ok){ setStatus(r.error||'Ошибка','err'); $('go').disabled=false; return; }
+  if(r.station){ $('hTitle').textContent=r.station; $('hSub').textContent='MCS '+(r.version||''); }
+  $('form').style.display='none'; $('bar').style.display='flex'; $('note').style.display='block'; $('editBtn').style.display='block';
+  setStatus('Вход выполнен, сканирую точки…');
+};
+
+window.onScan = function(js){
+  let r; try{ r=JSON.parse(js);}catch(e){ return; }
+  setStatus('Сканирую… разделов: '+r.c+', точек: '+r.p);
+};
+
 window.onConnectResult = function(js){
   $('go').disabled=false;
   let r; try{ r=JSON.parse(js); }catch(e){ setStatus('Битый ответ','err'); return; }
   if(!r.ok){ setStatus(r.error||'Ошибка','err'); return; }
-  if(r.station){ $('hTitle').textContent=r.station; $('hSub').textContent='MCS '+(r.version||'')+' • '+(r.points?r.points.length:0)+' точек'; }
   POINTS = r.points||[];
   $('form').style.display='none'; $('bar').style.display='flex'; $('note').style.display='block'; $('editBtn').style.display='block';
-  setStatus('✓ подключено, точек: '+POINTS.length,'ok');
+  $('hSub').textContent = $('hSub').textContent.split(' • ')[0] + ' • ' + POINTS.length + ' точек';
+  setStatus('✓ точек: '+POINTS.length,'ok');
   render(POINTS);
 };
 

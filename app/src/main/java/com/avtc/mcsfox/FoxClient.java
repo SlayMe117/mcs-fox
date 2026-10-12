@@ -335,35 +335,61 @@ public class FoxClient {
         return type != null && type.toLowerCase().contains("writable");
     }
 
-    /** Собрать точки numeric/boolean/enum только из веток Drivers и Logic. */
+    /** Обратная связь по ходу обхода (прогресс + возможность отмены). */
+    public interface Progress {
+        void scanned(int containers, int points);
+        boolean cancelled();
+    }
+
+    // служебные ветки драйверов/сети — не точки, их не обходим (ускоряет на порядок)
+    private static final Set<String> SKIP = new HashSet<>(Arrays.asList(
+        "health", "monitor", "alarmSourceInfo", "tuningPolicies", "historyPolicies",
+        "virtualPolicies", "workers", "sysDefProvider", "foxService", "localStation",
+        "serverConnections", "pollScheduler", "onDemandPollScheduler", "cachePolicy",
+        "retryTrigger", "pollConfig", "discoveryPreferences"));
+
+    private int scannedContainers, maxContainers = 1200, maxPoints = 4000;
+
     public List<Point> discoverPoints(int maxDepth) throws IOException {
+        return discoverPoints(maxDepth, null);
+    }
+
+    /** Собрать точки numeric/boolean/enum только из веток Drivers и Logic. */
+    public List<Point> discoverPoints(int maxDepth, Progress pr) throws IOException {
         List<Point> out = new ArrayList<>();
+        scannedContainers = 0;
         String rootSync = loadNode(rootHandle);
         for (Node c : parseChildren(rootSync, rootHandle)) {
             if (c.handle != null && (c.name.equals("Drivers") || c.name.equals("Logic")))
-                walkPoints(c, "", out, maxDepth);
+                walkPoints(c, "", out, maxDepth, pr);
         }
         return out;
     }
 
     /** parentPath — путь до родителя узла (без имени самого узла). */
-    private void walkPoints(Node node, String parentPath, List<Point> out, int depthLeft) throws IOException {
+    private void walkPoints(Node node, String parentPath, List<Point> out, int depthLeft, Progress pr) throws IOException {
         if (node.handle == null) return;
+        if (pr != null && pr.cancelled()) return;
+        if (out.size() >= maxPoints || scannedContainers >= maxContainers) return;
+
         String kind = pointKind(node.type);
-        if (kind != null) {                       // это точка — не углубляемся внутрь неё
+        if (kind != null) {                       // это точка — внутрь не углубляемся
             Point p = new Point();
             p.path = parentPath; p.name = node.name; p.kind = kind; p.type = node.type;
             p.handle = node.handle; p.writable = isWritable(node.type);
-            p.value = node.value;
-            if (p.value == null) p.value = loadValue(node.handle);
+            p.value = node.value;                 // значение берём из списка; отдельно не догружаем (быстрее)
             out.add(p);
             return;
         }
         if (depthLeft <= 0) return;
+        if (SKIP.contains(node.name)) return;     // служебная ветка — пропускаем
+
         String myPath = parentPath.isEmpty() ? node.name : parentPath + " / " + node.name;
         String sync = loadNode(node.handle);
+        scannedContainers++;
+        if (pr != null) pr.scanned(scannedContainers, out.size());
         for (Node c : parseChildren(sync, node.handle))
-            walkPoints(c, myPath, out, depthLeft - 1);
+            walkPoints(c, myPath, out, depthLeft - 1, pr);
     }
 
     /** Публичное чтение текущего значения точки (например, после set). */

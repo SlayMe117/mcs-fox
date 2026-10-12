@@ -18,8 +18,8 @@ import java.util.concurrent.TimeUnit;
 public class MainActivity extends Activity {
 
     private WebView web;
-    private FoxClient client;                 // постоянное соединение
-    private final ExecutorService exec = Executors.newSingleThreadExecutor();   // все операции по очереди
+    private FoxClient client;
+    private final ExecutorService exec = Executors.newSingleThreadExecutor();
     private final ScheduledExecutorService keepAlive = Executors.newSingleThreadScheduledExecutor();
     private volatile boolean connected = false;
 
@@ -52,11 +52,25 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> web.evaluateJavascript(js, null));
     }
 
+    private JSONObject pointsJson(List<FoxClient.Point> pts) throws Exception {
+        JSONObject r = new JSONObject();
+        r.put("ok", true);
+        JSONArray arr = new JSONArray();
+        for (FoxClient.Point p : pts) {
+            JSONObject o = new JSONObject();
+            o.put("path", p.path); o.put("name", p.name); o.put("kind", p.kind);
+            o.put("type", p.type); o.put("value", p.value);
+            o.put("writable", p.writable); o.put("handle", p.handle);
+            arr.put(o);
+        }
+        r.put("points", arr);
+        return r;
+    }
+
     class Bridge {
         @JavascriptInterface
         public void connect(String host, int port, String user, String pass, int depth) {
             exec.submit(() -> {
-                JSONObject r = new JSONObject();
                 try {
                     if (client != null) client.close();
                     client = new FoxClient();
@@ -64,25 +78,30 @@ public class MainActivity extends Activity {
                     Map<String,String> info = client.hello();
                     client.login(user, pass);
                     connected = true;
-                    List<FoxClient.Point> pts = client.discoverPoints(depth);
-                    r.put("ok", true);
-                    r.put("station", info.get("station.name"));
-                    r.put("version", info.get("app.version"));
-                    JSONArray arr = new JSONArray();
-                    for (FoxClient.Point p : pts) {
-                        JSONObject o = new JSONObject();
-                        o.put("path", p.path); o.put("name", p.name); o.put("kind", p.kind);
-                        o.put("type", p.type); o.put("value", p.value);
-                        o.put("writable", p.writable); o.put("handle", p.handle);
-                        arr.put(o);
-                    }
-                    r.put("points", arr);
+                    JSONObject head = new JSONObject();
+                    head.put("ok", true);
+                    head.put("station", info.get("station.name"));
+                    head.put("version", info.get("app.version"));
+                    callJs("onConnected", head.toString());
+
+                    List<FoxClient.Point> pts = client.discoverPoints(depth, new ScanProgress());
+                    callJs("onConnectResult", pointsJson(pts).toString());
                 } catch (SecurityException e) {
-                    connected = false; err(r, "Ошибка входа: " + e.getMessage());
+                    connected = false; callJs("onConnectResult", errJson("Ошибка входа: " + e.getMessage()));
                 } catch (Exception e) {
-                    connected = false; err(r, "Ошибка связи: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+                    connected = false; callJs("onConnectResult", errJson("Ошибка связи: " + e.getClass().getSimpleName() + ": " + e.getMessage()));
                 }
-                callJs("onConnectResult", r.toString());
+            });
+        }
+
+        @JavascriptInterface
+        public void refresh(int depth) {
+            exec.submit(() -> {
+                try {
+                    if (client == null || !connected) throw new IllegalStateException("нет соединения");
+                    List<FoxClient.Point> pts = client.discoverPoints(depth, new ScanProgress());
+                    callJs("onConnectResult", pointsJson(pts).toString());
+                } catch (Exception e) { callJs("onConnectResult", errJson(e.getMessage())); }
             });
         }
 
@@ -94,38 +113,26 @@ public class MainActivity extends Activity {
                     r.put("handle", handle);
                     if (client == null || !connected) throw new IllegalStateException("нет соединения");
                     client.setValue(handle, kind, value);
-                    String nv = client.readValue(handle);
-                    r.put("ok", true); r.put("value", nv);
-                } catch (Exception e) {
-                    err(r, e.getMessage());
-                }
-                callJs("onSetResult", r.toString());
-            });
-        }
-
-        @JavascriptInterface
-        public void refresh(int depth) {
-            exec.submit(() -> {
-                JSONObject r = new JSONObject();
-                try {
-                    if (client == null || !connected) throw new IllegalStateException("нет соединения");
-                    List<FoxClient.Point> pts = client.discoverPoints(depth);
-                    r.put("ok", true);
-                    JSONArray arr = new JSONArray();
-                    for (FoxClient.Point p : pts) {
-                        JSONObject o = new JSONObject();
-                        o.put("path", p.path); o.put("name", p.name); o.put("kind", p.kind);
-                        o.put("type", p.type); o.put("value", p.value);
-                        o.put("writable", p.writable); o.put("handle", p.handle);
-                        arr.put(o);
-                    }
-                    r.put("points", arr);
+                    r.put("ok", true); r.put("value", client.readValue(handle));
                 } catch (Exception e) { err(r, e.getMessage()); }
-                callJs("onConnectResult", r.toString());
+                callJs("onSetResult", r.toString());
             });
         }
     }
 
+    /** прогресс сканирования: не чаще раза в ~300 мс */
+    class ScanProgress implements FoxClient.Progress {
+        long last = 0;
+        public void scanned(int c, int p) {
+            long now = System.currentTimeMillis();
+            if (now - last > 300) { last = now; callJs("onScan", "{\"c\":" + c + ",\"p\":" + p + "}"); }
+        }
+        public boolean cancelled() { return !connected; }
+    }
+
+    private String errJson(String msg) {
+        JSONObject o = new JSONObject(); err(o, msg); return o.toString();
+    }
     private static void err(JSONObject o, String msg) {
         try { o.put("ok", false); o.put("error", msg); } catch (Exception ignored) {}
     }
