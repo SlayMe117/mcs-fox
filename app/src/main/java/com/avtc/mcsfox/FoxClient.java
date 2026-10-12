@@ -458,7 +458,15 @@ public class FoxClient {
         return p;
     }
 
-    private static final Pattern TAG = Pattern.compile("<(/?)(p|l)\\b([^>]*?)(/?)>");
+    // Устойчивый разбор тега: атрибуты как name="value", значение может содержать > / ; и пр.
+    private static final Pattern TAG = Pattern.compile("<(/?)(p|l)((?:\\s+[\\w:.\\-]+=\"[^\"]*\")*)\\s*(/?)>");
+
+    /** Только для тестов: разобрать готовый sync. */
+    List<Point> debugParse(String sync, String base) {
+        List<Point> o = new ArrayList<>();
+        parseTreePoints(sync, base, o, null);
+        return o;
+    }
 
     static class Lvl {
         final boolean pushedName, skip;
