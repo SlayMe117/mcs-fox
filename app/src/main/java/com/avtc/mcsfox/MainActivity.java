@@ -8,15 +8,24 @@ import android.webkit.WebSettings;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends Activity {
 
     private WebView web;
+    private FoxClient client;                 // постоянное соединение
+    private final ExecutorService exec = Executors.newSingleThreadExecutor();   // все операции по очереди
+    private final ScheduledExecutorService keepAlive = Executors.newSingleThreadScheduledExecutor();
+    private volatile boolean connected = false;
 
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
-        super.onCreate(savedInstanceState);
+    protected void onCreate(Bundle b) {
+        super.onCreate(b);
         web = new WebView(this);
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
@@ -24,59 +33,100 @@ public class MainActivity extends Activity {
         web.addJavascriptInterface(new Bridge(), "Fox");
         setContentView(web);
         web.loadUrl("file:///android_asset/index.html");
+
+        keepAlive.scheduleWithFixedDelay(() -> {
+            if (connected && client != null) exec.submit(() -> {
+                try { client.ping(); } catch (Exception e) { connected = false; }
+            });
+        }, 45, 45, TimeUnit.SECONDS);
     }
 
-    /** Передать результат обратно в JS: window.onFoxResult(jsonString). */
-    private void callJs(final String fn, final String jsonPayload) {
-        final String js = fn + "(" + JSONObject.quote(jsonPayload) + ")";
+    @Override protected void onDestroy() {
+        super.onDestroy();
+        keepAlive.shutdownNow(); exec.shutdownNow();
+        if (client != null) client.close();
+    }
+
+    private void callJs(String fn, String json) {
+        final String js = fn + "(" + JSONObject.quote(json) + ")";
         runOnUiThread(() -> web.evaluateJavascript(js, null));
     }
 
-    /** Мост между WebView и Java-клиентом Fox. Методы вызываются из фонового потока WebView. */
     class Bridge {
         @JavascriptInterface
-        public void discover(final String host, final int port, final String user,
-                             final String pass, final int depth) {
-            new Thread(() -> {
-                FoxClient c = new FoxClient();
-                JSONObject res = new JSONObject();
+        public void connect(String host, int port, String user, String pass, int depth) {
+            exec.submit(() -> {
+                JSONObject r = new JSONObject();
                 try {
-                    c.connect(host, port, 8000);
-                    Map<String,String> info = c.hello();
-                    c.login(user, pass);
-                    FoxClient.Node root = c.discover(depth);
-                    res.put("ok", true);
-                    res.put("station", info.get("station.name"));
-                    res.put("version", info.get("app.version"));
-                    res.put("tree", nodeToJson(root));
+                    if (client != null) client.close();
+                    client = new FoxClient();
+                    client.connect(host, port, 8000);
+                    Map<String,String> info = client.hello();
+                    client.login(user, pass);
+                    connected = true;
+                    List<FoxClient.Point> pts = client.discoverPoints(depth);
+                    r.put("ok", true);
+                    r.put("station", info.get("station.name"));
+                    r.put("version", info.get("app.version"));
+                    JSONArray arr = new JSONArray();
+                    for (FoxClient.Point p : pts) {
+                        JSONObject o = new JSONObject();
+                        o.put("path", p.path); o.put("name", p.name); o.put("kind", p.kind);
+                        o.put("type", p.type); o.put("value", p.value);
+                        o.put("writable", p.writable); o.put("handle", p.handle);
+                        arr.put(o);
+                    }
+                    r.put("points", arr);
                 } catch (SecurityException e) {
-                    put(res, "Ошибка входа: " + e.getMessage());
+                    connected = false; err(r, "Ошибка входа: " + e.getMessage());
                 } catch (Exception e) {
-                    put(res, "Ошибка связи: " + e.getClass().getSimpleName() + ": " + e.getMessage());
-                } finally {
-                    c.close();
+                    connected = false; err(r, "Ошибка связи: " + e.getClass().getSimpleName() + ": " + e.getMessage());
                 }
-                callJs("onFoxResult", res.toString());
-            }).start();
+                callJs("onConnectResult", r.toString());
+            });
+        }
+
+        @JavascriptInterface
+        public void setValue(String handle, String kind, String value) {
+            exec.submit(() -> {
+                JSONObject r = new JSONObject();
+                try {
+                    r.put("handle", handle);
+                    if (client == null || !connected) throw new IllegalStateException("нет соединения");
+                    client.setValue(handle, kind, value);
+                    String nv = client.readValue(handle);
+                    r.put("ok", true); r.put("value", nv);
+                } catch (Exception e) {
+                    err(r, e.getMessage());
+                }
+                callJs("onSetResult", r.toString());
+            });
+        }
+
+        @JavascriptInterface
+        public void refresh(int depth) {
+            exec.submit(() -> {
+                JSONObject r = new JSONObject();
+                try {
+                    if (client == null || !connected) throw new IllegalStateException("нет соединения");
+                    List<FoxClient.Point> pts = client.discoverPoints(depth);
+                    r.put("ok", true);
+                    JSONArray arr = new JSONArray();
+                    for (FoxClient.Point p : pts) {
+                        JSONObject o = new JSONObject();
+                        o.put("path", p.path); o.put("name", p.name); o.put("kind", p.kind);
+                        o.put("type", p.type); o.put("value", p.value);
+                        o.put("writable", p.writable); o.put("handle", p.handle);
+                        arr.put(o);
+                    }
+                    r.put("points", arr);
+                } catch (Exception e) { err(r, e.getMessage()); }
+                callJs("onConnectResult", r.toString());
+            });
         }
     }
 
-    private static void put(JSONObject o, String err) {
-        try { o.put("ok", false); o.put("error", err); } catch (Exception ignored) {}
-    }
-
-    private static JSONObject nodeToJson(FoxClient.Node n) throws Exception {
-        JSONObject o = new JSONObject();
-        o.put("name", n.name);
-        if (n.type != null) o.put("type", n.type);
-        if (n.value != null) o.put("value", n.value);
-        if (n.handle != null) o.put("handle", n.handle);
-        o.put("expandable", n.expandable);
-        if (!n.children.isEmpty()) {
-            JSONArray arr = new JSONArray();
-            for (FoxClient.Node c : n.children) arr.put(nodeToJson(c));
-            o.put("children", arr);
-        }
-        return o;
+    private static void err(JSONObject o, String msg) {
+        try { o.put("ok", false); o.put("error", msg); } catch (Exception ignored) {}
     }
 }

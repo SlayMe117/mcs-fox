@@ -315,6 +315,105 @@ public class FoxClient {
         }
     }
 
+    // ============================================================ точки
+
+    public static class Point {
+        public String path, name, kind, type, value, handle;
+        public boolean writable;
+    }
+
+    /** numeric / boolean / enum — по имени типа компонента, иначе null (не точка). */
+    public static String pointKind(String type) {
+        if (type == null) return null;
+        String t = type.toLowerCase();
+        if (t.contains("numeric")) return "numeric";
+        if (t.contains("boolean")) return "boolean";
+        if (t.contains("enum"))    return "enum";
+        return null;
+    }
+    public static boolean isWritable(String type) {
+        return type != null && type.toLowerCase().contains("writable");
+    }
+
+    /** Собрать точки numeric/boolean/enum только из веток Drivers и Logic. */
+    public List<Point> discoverPoints(int maxDepth) throws IOException {
+        List<Point> out = new ArrayList<>();
+        String rootSync = loadNode(rootHandle);
+        for (Node c : parseChildren(rootSync, rootHandle)) {
+            if (c.handle != null && (c.name.equals("Drivers") || c.name.equals("Logic")))
+                walkPoints(c, "", out, maxDepth);
+        }
+        return out;
+    }
+
+    /** parentPath — путь до родителя узла (без имени самого узла). */
+    private void walkPoints(Node node, String parentPath, List<Point> out, int depthLeft) throws IOException {
+        if (node.handle == null) return;
+        String kind = pointKind(node.type);
+        if (kind != null) {                       // это точка — не углубляемся внутрь неё
+            Point p = new Point();
+            p.path = parentPath; p.name = node.name; p.kind = kind; p.type = node.type;
+            p.handle = node.handle; p.writable = isWritable(node.type);
+            p.value = node.value;
+            if (p.value == null) p.value = loadValue(node.handle);
+            out.add(p);
+            return;
+        }
+        if (depthLeft <= 0) return;
+        String myPath = parentPath.isEmpty() ? node.name : parentPath + " / " + node.name;
+        String sync = loadNode(node.handle);
+        for (Node c : parseChildren(sync, node.handle))
+            walkPoints(c, myPath, out, depthLeft - 1);
+    }
+
+    /** Публичное чтение текущего значения точки (например, после set). */
+    public String readValue(String handle) throws IOException {
+        String v = loadValue(handle);
+        return v;
+    }
+
+    /** Лёгкий keepalive, чтобы станция не закрывала сессию по таймауту. */
+    public void ping() throws IOException {
+        send("s", ++msgNum, "0", "sys summary", "");
+        for (int k = 0; k < 10; k++) {
+            Frame f = readFrame();
+            if (f.cmd.contains("sys summary")) return;
+        }
+    }
+
+    /** Значение точки из слота out (запасной путь, если его не было в списке). */
+    private String loadValue(String handle) throws IOException {
+        String sync = loadNode(handle);
+        for (Node c : parseChildren(sync, handle)) {
+            if ("out".equals(c.name) && c.value != null) return c.value;
+        }
+        for (Node c : parseChildren(sync, handle)) {
+            if (c.value != null) return c.value;
+        }
+        return null;
+    }
+
+    /** Запись значения точки через действие set (station invoke) в рамках текущей сессии. */
+    public String setValue(String handle, String kind, String value) throws IOException {
+        String t, v;
+        switch (kind) {
+            case "boolean": t = "b:Boolean"; v = value; break;         // true/false
+            case "enum":    t = "b:DynamicEnum"; v = value; break;     // ordinal
+            default:        t = "b:Double"; v = value; break;          // numeric
+        }
+        String bog = "<bog version=\"1.0\">\n<p m=\"b=baja\" t=\"" + t + "\" v=\"" + v + "\"/>\n</bog>\n";
+        send("s", ++msgNum, "0", "station invoke",
+            "ord=s:h:" + handle + "\naction=s:set\narg=o:bog " + bog.length() + "[" + bog + "]\n");
+        for (int k = 0; k < 20; k++) {
+            Frame f = readFrame();
+            if (f.cmd.contains("station invoke")) {
+                if (f.kind.equals("e")) throw new IOException("set отклонён станцией");
+                return "ok";
+            }
+        }
+        return "нет ответа на set";
+    }
+
     // ============================================================ crypto утилиты
 
     private static byte[] pbkdf2(char[] pw, byte[] salt, int iters, int len) {
