@@ -249,29 +249,41 @@ public class FoxClient {
 
     // ============================================================ дерево
 
-    /** Загрузить один уровень детей узла handle (station load + цепь syncFromMaster). */
+    /** Загрузить один уровень детей узла (station load depth=0). */
     public String loadNode(String handle) throws IOException {
-        send("s", ++msgNum, "0", "station load", "ord=s:h:" + handle + "\ndepth=i:0\n");
-        // ждём ack station load (n или r)
-        for (int k = 0; k < 10; k++) {
+        return loadTree(handle, 0, false);
+    }
+
+    /**
+     * Загрузить поддерево узла на глубину depth одним запросом.
+     * useSub=true -> station sub (так Workbench тянет большие поддеревья за один раз),
+     * иначе station load. Склеивает все кадры circuit stream до закрытия цепи.
+     */
+    public String loadTree(String handle, int depth, boolean useSub) throws IOException {
+        String cmd = useSub ? "station sub" : "station load";
+        send("s", ++msgNum, "0", cmd, "ord=s:h:" + handle + "\ndepth=i:" + depth + "\n");
+        for (int k = 0; k < 12; k++) {            // ack (n/r)
             Frame a = readFrame();
-            if (a.cmd.contains("station load")) break;
+            if (a.cmd.contains(cmd)) break;
         }
         int cid = circuitId; circuitId += 2;
         send("a", ++msgNum, "-1", "circuit open",
             "id=i:" + cid + "\nchannel=s:station\ncommand=s:syncFromMaster\n");
         send("a", ++msgNum, "-1", "circuit stream", "id=i:" + cid + "\ndata=b:3[{\n}]\n");
-        String sync = null;
-        for (int k = 0; k < 40; k++) {
+        StringBuilder sync = new StringBuilder();
+        for (int k = 0; k < 200000; k++) {        // большие поддеревья приходят многими кадрами
             Frame a = readFrame();
-            if (a.cmd.contains("circuit stream") && String.valueOf(cid).equals(strip(a.fields.get("id")))) {
+            String id = strip(a.fields.get("id"));
+            if (a.cmd.contains("circuit stream") && String.valueOf(cid).equals(id)) {
                 String data = a.fields.get("data");
-                if (data != null && data.contains("<sync")) { sync = data; }
+                if (data != null) sync.append(data);
             }
-            if (a.cmd.contains("circuit close") && String.valueOf(cid).equals(strip(a.fields.get("id")))) break;
+            if (a.cmd.contains("circuit close") && String.valueOf(cid).equals(id)) break;
         }
         send("a", ++msgNum, "-1", "circuit close", "id=i:" + cid + "\n");
-        return sync == null ? "" : sync;
+        if (useSub)                                // снять подписку, чтобы не шёл поток обновлений
+            send("a", ++msgNum, "-1", "station unsub", "ord=s:h:" + handle + "\n");
+        return sync.toString();
     }
 
     /** Разобрать детей из <sync>…</sync>, пропустив сам контейнер handle. */
@@ -348,48 +360,101 @@ public class FoxClient {
         "serverConnections", "pollScheduler", "onDemandPollScheduler", "cachePolicy",
         "retryTrigger", "pollConfig", "discoveryPreferences"));
 
-    private int scannedContainers, maxContainers = 1200, maxPoints = 4000;
+    private int maxPoints = 5000;
 
     public List<Point> discoverPoints(int maxDepth) throws IOException {
         return discoverPoints(maxDepth, null);
     }
 
-    /** Собрать точки numeric/boolean/enum только из веток Drivers и Logic. */
+    /**
+     * Собрать точки numeric/boolean/enum из веток Drivers и Logic.
+     * Каждую ветку тянем ОДНИМ запросом (station sub на глубину), дерево разбираем локально.
+     */
     public List<Point> discoverPoints(int maxDepth, Progress pr) throws IOException {
         List<Point> out = new ArrayList<>();
-        scannedContainers = 0;
-        String rootSync = loadNode(rootHandle);
+        int depth = Math.max(maxDepth, 2);
+        String rootSync = loadNode(rootHandle);                 // 1 запрос — найти Drivers/Logic
         for (Node c : parseChildren(rootSync, rootHandle)) {
-            if (c.handle != null && (c.name.equals("Drivers") || c.name.equals("Logic")))
-                walkPoints(c, "", out, maxDepth, pr);
+            if (c.handle == null) continue;
+            if (!c.name.equals("Drivers") && !c.name.equals("Logic")) continue;
+            if (pr != null && pr.cancelled()) break;
+            String sub = loadTree(c.handle, depth, true);       // 1 запрос на всю ветку
+            parseTreePoints(sub, c.name, out, pr);
         }
         return out;
     }
 
-    /** parentPath — путь до родителя узла (без имени самого узла). */
-    private void walkPoints(Node node, String parentPath, List<Point> out, int depthLeft, Progress pr) throws IOException {
-        if (node.handle == null) return;
-        if (pr != null && pr.cancelled()) return;
-        if (out.size() >= maxPoints || scannedContainers >= maxContainers) return;
+    /** Рекурсивный разбор вложенного <sync> поддерева, сбор точек с путями. */
+    private void parseTreePoints(String sync, String baseName, List<Point> out, Progress pr) {
+        Deque<Lvl> frames = new ArrayDeque<>();
+        List<String> path = new ArrayList<>();
+        int skipDepth = 0, containers = 0;
+        Matcher m = TAG.matcher(sync);
+        while (m.find()) {
+            if (out.size() >= maxPoints) break;
+            boolean closing = "/".equals(m.group(1));
+            String tag = m.group(2);                       // p или l
+            String attrs = m.group(3) == null ? "" : m.group(3);
+            boolean self = "/".equals(m.group(4));
 
-        String kind = pointKind(node.type);
-        if (kind != null) {                       // это точка — внутрь не углубляемся
-            Point p = new Point();
-            p.path = parentPath; p.name = node.name; p.kind = kind; p.type = node.type;
-            p.handle = node.handle; p.writable = isWritable(node.type);
-            p.value = node.value;                 // значение берём из списка; отдельно не догружаем (быстрее)
-            out.add(p);
-            return;
+            if (tag.equals("l")) {                         // обёртка <l> — только баланс стека
+                if (closing) { if (!frames.isEmpty()) popFrame(frames, path); }
+                else if (!self) frames.push(new Lvl(false, false));
+                continue;
+            }
+            // tag == p
+            String n = attr(attrs, "n"), h = attr(attrs, "h"),
+                   t = attr(attrs, "t"), v = attr(attrs, "v");
+            String kind = pointKind(t);
+
+            if (self) {                                    // лист
+                if (skipDepth == 0 && kind != null && h != null)
+                    out.add(point(path, n, h, t, v));
+                continue;
+            }
+            if (closing) {                                 // </p>
+                Lvl f = frames.isEmpty() ? new Lvl(false,false) : frames.pop();
+                if (f.pushedName && !path.isEmpty()) path.remove(path.size()-1);
+                if (f.skip) skipDepth--;
+                continue;
+            }
+            // открывающий <p ...>
+            if (skipDepth > 0) { frames.push(new Lvl(false, false)); continue; }
+            if (kind != null && h != null) {               // точка с детьми — записать и не углубляться
+                out.add(point(path, n, h, t, v));
+                frames.push(new Lvl(false, true)); skipDepth++;
+            } else if (n != null && SKIP.contains(n)) {    // служебная ветка — пропустить поддерево
+                frames.push(new Lvl(false, true)); skipDepth++;
+            } else {                                       // контейнер — добавить имя в путь
+                String name = (path.isEmpty() && n == null) ? baseName : (n != null ? slotDecode(n) : baseName);
+                path.add(name); frames.push(new Lvl(true, false));
+                containers++;
+                if (pr != null && (containers % 20 == 0)) pr.scanned(containers, out.size());
+            }
         }
-        if (depthLeft <= 0) return;
-        if (SKIP.contains(node.name)) return;     // служебная ветка — пропускаем
+        if (pr != null) pr.scanned(containers, out.size());
+    }
 
-        String myPath = parentPath.isEmpty() ? node.name : parentPath + " / " + node.name;
-        String sync = loadNode(node.handle);
-        scannedContainers++;
-        if (pr != null) pr.scanned(scannedContainers, out.size());
-        for (Node c : parseChildren(sync, node.handle))
-            walkPoints(c, myPath, out, depthLeft - 1, pr);
+    private static void popFrame(Deque<Lvl> frames, List<String> path) {
+        Lvl f = frames.pop();
+        if (f.pushedName && !path.isEmpty()) path.remove(path.size()-1);
+    }
+
+    private static Point point(List<String> path, String n, String h, String t, String v) {
+        Point p = new Point();
+        p.path = String.join(" / ", path);
+        p.name = n != null ? slotDecode(n) : "?";
+        p.kind = pointKind(t); p.type = t; p.handle = h;
+        p.writable = isWritable(t);
+        p.value = v != null ? foxDecode(v) : null;
+        return p;
+    }
+
+    private static final Pattern TAG = Pattern.compile("<(/?)(p|l)\\b([^>]*?)(/?)>");
+
+    static class Lvl {
+        final boolean pushedName, skip;
+        Lvl(boolean pushedName, boolean skip){ this.pushedName=pushedName; this.skip=skip; }
     }
 
     /** Публичное чтение текущего значения точки (например, после set). */
@@ -401,7 +466,7 @@ public class FoxClient {
     /** Лёгкий keepalive, чтобы станция не закрывала сессию по таймауту. */
     public void ping() throws IOException {
         send("s", ++msgNum, "0", "sys summary", "");
-        for (int k = 0; k < 10; k++) {
+        for (int k = 0; k < 60; k++) {
             Frame f = readFrame();
             if (f.cmd.contains("sys summary")) return;
         }
@@ -430,7 +495,7 @@ public class FoxClient {
         String bog = "<bog version=\"1.0\">\n<p m=\"b=baja\" t=\"" + t + "\" v=\"" + v + "\"/>\n</bog>\n";
         send("s", ++msgNum, "0", "station invoke",
             "ord=s:h:" + handle + "\naction=s:set\narg=o:bog " + bog.length() + "[" + bog + "]\n");
-        for (int k = 0; k < 20; k++) {
+        for (int k = 0; k < 200; k++) {
             Frame f = readFrame();
             if (f.cmd.contains("station invoke")) {
                 if (f.kind.equals("e")) throw new IOException("set отклонён станцией");
