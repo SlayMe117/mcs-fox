@@ -106,6 +106,21 @@ public class MainActivity extends Activity {
         }
 
         @JavascriptInterface
+        public void poll(int depth) {
+            exec.submit(() -> {
+                JSONObject r = new JSONObject();
+                try {
+                    if (client == null || !connected) throw new IllegalStateException("нет соединения");
+                    List<FoxClient.Point> pts = client.discoverPoints(depth, null);
+                    JSONObject vals = new JSONObject();
+                    for (FoxClient.Point p : pts) vals.put(p.handle, p.value == null ? JSONObject.NULL : p.value);
+                    r.put("ok", true); r.put("values", vals);
+                } catch (Exception e) { err(r, e.getMessage()); }
+                callJs("onValues", r.toString());
+            });
+        }
+
+        @JavascriptInterface
         public void setValue(String handle, String kind, String value) {
             exec.submit(() -> {
                 JSONObject r = new JSONObject();

@@ -372,7 +372,7 @@ public class FoxClient {
      */
     public List<Point> discoverPoints(int maxDepth, Progress pr) throws IOException {
         List<Point> out = new ArrayList<>();
-        int depth = Math.max(maxDepth, 2);
+        int depth = maxDepth + 4;                               // +запас, чтобы out/value точки попали в выборку
         String rootSync = loadNode(rootHandle);                 // 1 запрос — найти Drivers/Logic
         for (Node c : parseChildren(rootSync, rootHandle)) {
             if (c.handle == null) continue;
@@ -384,55 +384,63 @@ public class FoxClient {
         return out;
     }
 
-    /** Рекурсивный разбор вложенного <sync> поддерева, сбор точек с путями. */
+    /** Рекурсивный разбор вложенного <sync> поддерева, сбор точек с путями и значениями из out. */
     private void parseTreePoints(String sync, String baseName, List<Point> out, Progress pr) {
         Deque<Lvl> frames = new ArrayDeque<>();
         List<String> path = new ArrayList<>();
         int skipDepth = 0, containers = 0;
+        Point cur = null;                              // точка, внутри которой ищем out/value
         Matcher m = TAG.matcher(sync);
         while (m.find()) {
             if (out.size() >= maxPoints) break;
             boolean closing = "/".equals(m.group(1));
-            String tag = m.group(2);                       // p или l
+            String tag = m.group(2);
             String attrs = m.group(3) == null ? "" : m.group(3);
             boolean self = "/".equals(m.group(4));
 
-            if (tag.equals("l")) {                         // обёртка <l> — только баланс стека
+            if (tag.equals("l")) {
                 if (closing) { if (!frames.isEmpty()) popFrame(frames, path); }
-                else if (!self) frames.push(new Lvl(false, false));
+                else if (!self) frames.push(new Lvl(false, false, null));
                 continue;
             }
-            // tag == p
             String n = attr(attrs, "n"), h = attr(attrs, "h"),
                    t = attr(attrs, "t"), v = attr(attrs, "v");
             String kind = pointKind(t);
 
-            if (self) {                                    // лист
-                if (skipDepth == 0 && kind != null && h != null)
-                    out.add(point(path, n, h, t, v));
+            if (self) {                                // лист
+                if (skipDepth > 0) captureValue(cur, n, v);          // out/value внутри точки
+                else if (kind != null && h != null) out.add(point(path, n, h, t, v));
                 continue;
             }
-            if (closing) {                                 // </p>
-                Lvl f = frames.isEmpty() ? new Lvl(false,false) : frames.pop();
+            if (closing) {                             // </p>
+                Lvl f = frames.isEmpty() ? new Lvl(false,false,null) : frames.pop();
                 if (f.pushedName && !path.isEmpty()) path.remove(path.size()-1);
                 if (f.skip) skipDepth--;
+                if (f.point != null) cur = null;
                 continue;
             }
             // открывающий <p ...>
-            if (skipDepth > 0) { frames.push(new Lvl(false, false)); continue; }
-            if (kind != null && h != null) {               // точка с детьми — записать и не углубляться
-                out.add(point(path, n, h, t, v));
-                frames.push(new Lvl(false, true)); skipDepth++;
-            } else if (n != null && SKIP.contains(n)) {    // служебная ветка — пропустить поддерево
-                frames.push(new Lvl(false, true)); skipDepth++;
-            } else {                                       // контейнер — добавить имя в путь
+            if (skipDepth > 0) { captureValue(cur, n, v); frames.push(new Lvl(false, false, null)); continue; }
+            if (kind != null && h != null) {           // точка — записать, значение добираем из out
+                Point p = point(path, n, h, t, v); out.add(p);
+                frames.push(new Lvl(false, true, p)); skipDepth++; cur = p;
+            } else if (n != null && SKIP.contains(n)) {
+                frames.push(new Lvl(false, true, null)); skipDepth++;
+            } else {
                 String name = (path.isEmpty() && n == null) ? baseName : (n != null ? slotDecode(n) : baseName);
-                path.add(name); frames.push(new Lvl(true, false));
+                path.add(name); frames.push(new Lvl(true, false, null));
                 containers++;
                 if (pr != null && (containers % 20 == 0)) pr.scanned(containers, out.size());
             }
         }
         if (pr != null) pr.scanned(containers, out.size());
+    }
+
+    /** Значение точки лежит в out (а иногда в out>value). Берём его, out приоритетнее. */
+    private static void captureValue(Point cur, String n, String v) {
+        if (cur == null || v == null) return;
+        if ("out".equals(n)) cur.value = foxDecode(v);
+        else if ("value".equals(n) && cur.value == null) cur.value = foxDecode(v);
     }
 
     private static void popFrame(Deque<Lvl> frames, List<String> path) {
@@ -454,13 +462,18 @@ public class FoxClient {
 
     static class Lvl {
         final boolean pushedName, skip;
-        Lvl(boolean pushedName, boolean skip){ this.pushedName=pushedName; this.skip=skip; }
+        final Point point;
+        Lvl(boolean pushedName, boolean skip, Point point){ this.pushedName=pushedName; this.skip=skip; this.point=point; }
     }
 
-    /** Публичное чтение текущего значения точки (например, после set). */
+    /** Публичное чтение текущего значения точки (например, после set): грузим point depth 3, берём out. */
     public String readValue(String handle) throws IOException {
-        String v = loadValue(handle);
-        return v;
+        String sync = loadTree(handle, 3, false);
+        Matcher m = Pattern.compile("n=\"out\"[^>]*\\sv=\"([^\"]*)\"").matcher(sync);
+        if (m.find()) return foxDecode(m.group(1));
+        m = Pattern.compile("n=\"value\"[^>]*\\sv=\"([^\"]*)\"").matcher(sync);
+        if (m.find()) return foxDecode(m.group(1));
+        return loadValue(handle);
     }
 
     /** Лёгкий keepalive, чтобы станция не закрывала сессию по таймауту. */

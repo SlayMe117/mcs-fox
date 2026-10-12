@@ -93,6 +93,7 @@
 
 <div class="bar" id="bar" style="display:none">
   <input id="search" placeholder="поиск точки…" oninput="applyFilter()">
+  <button class="mini" id="live" onclick="toggleLive()">● онлайн</button>
   <button class="mini" onclick="refresh()">Обновить</button>
 </div>
 <div class="note" id="note" style="display:none">Запись значений (set) — бета, проверяйте на безопасных точках.</div>
@@ -102,14 +103,23 @@
 <script>
 const $ = id => document.getElementById(id);
 let POINTS = [];
+let CUR_DEPTH = 6, live = true, pollTimer = null;
+const POLL_MS = 4000;
 
 try{ for(const k of ['host','user','depth','port']){ const v=localStorage.getItem('mcs_'+k); if(v)$(k).value=v; } }catch(e){}
 
-function showForm(){ $('form').style.display='block'; $('bar').style.display='none'; $('note').style.display='none'; $('list').innerHTML=''; $('editBtn').style.display='none'; }
+function showForm(){ stopPoll(); $('form').style.display='block'; $('bar').style.display='none'; $('note').style.display='none'; $('list').innerHTML=''; $('editBtn').style.display='none'; }
+
+// онлайн-опрос значений
+function startPoll(){ if(pollTimer) return; scheduleNext(); }
+function stopPoll(){ if(pollTimer){ clearTimeout(pollTimer); pollTimer=null; } }
+function scheduleNext(){ if(!live) return; pollTimer=setTimeout(()=>{ pollTimer=null; if(typeof Fox!=='undefined') Fox.poll(CUR_DEPTH); else scheduleNext(); }, POLL_MS); }
+function toggleLive(){ live=!live; $('live').textContent=(live?'● ':'○ ')+'онлайн'; $('live').style.color=live?'var(--ok)':'var(--muted)'; if(live) startPoll(); else stopPoll(); }
 
 function connect(){
   const host=$('host').value.trim(), port=parseInt($('port').value)||1911;
-  const user=$('user').value.trim(), pass=$('pass').value, depth=parseInt($('depth').value)||8;
+  const user=$('user').value.trim(), pass=$('pass').value, depth=parseInt($('depth').value)||6;
+  CUR_DEPTH=depth;
   if(!host){ setStatus('Укажите адрес станции','err'); return; }
   try{ localStorage.setItem('mcs_host',host); localStorage.setItem('mcs_user',user);
        localStorage.setItem('mcs_depth',depth); localStorage.setItem('mcs_port',port); }catch(e){}
@@ -117,7 +127,7 @@ function connect(){
   if(typeof Fox==='undefined'){ setStatus('Нет моста Fox (открыто вне приложения)','err'); $('go').disabled=false; return; }
   Fox.connect(host, port, user, pass, depth);
 }
-function refresh(){ const d=parseInt($('depth').value)||8; setStatus('Обновляю…'); Fox.refresh(d); }
+function refresh(){ const d=parseInt($('depth').value)||6; CUR_DEPTH=d; setStatus('Обновляю…'); Fox.refresh(d); }
 
 function setStatus(t,cls){ const s=$('status'); s.textContent=t; s.className=cls||''; }
 const clean = v => v ? String(v).split(' {')[0].trim() : '—';
@@ -144,8 +154,31 @@ window.onConnectResult = function(js){
   $('form').style.display='none'; $('bar').style.display='flex'; $('note').style.display='block'; $('editBtn').style.display='block';
   $('hSub').textContent = $('hSub').textContent.split(' • ')[0] + ' • ' + POINTS.length + ' точек';
   setStatus('✓ точек: '+POINTS.length,'ok');
-  render(POINTS);
+  applyFilter();
+  startPoll();
 };
+
+// онлайн-обновление значений (не трогаем строки в режиме правки)
+window.onValues = function(js){
+  let r; try{ r=JSON.parse(js);}catch(e){ scheduleNext(); return; }
+  if(r.ok && r.values) updateValues(r.values);
+  scheduleNext();
+};
+function updateValues(map){
+  for(const p of POINTS){
+    if(!(p.handle in map)) continue;
+    const nv=map[p.handle]; if(nv===null||nv===undefined) continue;
+    p.value=nv;
+    const row=document.querySelector('.pt[data-handle="'+p.handle+'"]'); if(!row) continue;
+    if(row.querySelector('.edit')||row.querySelector('.pending')) continue;
+    const ctrl=row.lastChild;
+    if(ctrl.classList && ctrl.classList.contains('toggle')){
+      ctrl.classList.toggle('on', /true|on|1|вкл/i.test(clean(nv)));
+    } else if(ctrl.classList && ctrl.classList.contains('val')){
+      ctrl.textContent=clean(nv);
+    }
+  }
+}
 
 function applyFilter(){
   const q=$('search').value.toLowerCase().trim();
