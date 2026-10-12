@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>MCS Fox</title>
+<style>
+  :root{
+    --bg:#0f141a; --panel:#1a222c; --panel2:#141b23; --line:#2a3542;
+    --text:#e7edf3; --muted:#8aa0b4; --accent:#3da9fc; --ok:#46c08a; --err:#e56a6a;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--text);
+    font:15px/1.4 -apple-system,Roboto,"Segoe UI",sans-serif;
+    display:flex;flex-direction:column}
+  header{padding:14px 16px;background:var(--panel);border-bottom:1px solid var(--line);
+    font-weight:600;font-size:17px;letter-spacing:.3px}
+  header small{color:var(--muted);font-weight:400;font-size:12px;margin-left:8px}
+  .form{padding:12px 16px;background:var(--panel2);border-bottom:1px solid var(--line)}
+  .row{display:flex;gap:8px;margin-bottom:8px}
+  .row .f{flex:1;display:flex;flex-direction:column;gap:3px}
+  label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+  input{background:#0c1116;border:1px solid var(--line);color:var(--text);
+    border-radius:8px;padding:10px;font-size:15px;width:100%}
+  input:focus{outline:none;border-color:var(--accent)}
+  button{width:100%;padding:12px;border:0;border-radius:8px;background:var(--accent);
+    color:#04121f;font-weight:600;font-size:15px}
+  button:disabled{opacity:.5}
+  #status{padding:8px 16px;font-size:13px;color:var(--muted);min-height:20px}
+  #status.ok{color:var(--ok)} #status.err{color:var(--err)}
+  #tree{flex:1;overflow:auto;padding:4px 10px 24px}
+  ul{list-style:none;margin:0;padding-left:16px}
+  li{padding:3px 0}
+  .node{display:flex;align-items:baseline;gap:7px;cursor:default}
+  .tw{color:var(--muted);width:12px;display:inline-block;cursor:pointer}
+  .nm{font-weight:500}
+  .ty{color:var(--muted);font-size:11px}
+  .val{color:var(--accent);margin-left:auto;font-variant-numeric:tabular-nums;
+    background:#0c1116;border:1px solid var(--line);border-radius:6px;padding:1px 7px;font-size:13px}
+  .collapsed > ul{display:none}
+</style>
+</head>
+<body>
+<header>MCS Fox <small>MCS network • прямое подключение</small></header>
+
+<div class="form">
+  <div class="row">
+    <div class="f" style="flex:2"><label>Адрес станции</label><input id="host" placeholder="192.168.0.x" autocapitalize="off" autocorrect="off"></div>
+    <div class="f" style="flex:.7"><label>Порт</label><input id="port" value="1911" inputmode="numeric"></div>
+  </div>
+  <div class="row">
+    <div class="f"><label>Пользователь</label><input id="user" autocapitalize="off" autocorrect="off"></div>
+    <div class="f"><label>Пароль</label><input id="pass" type="password"></div>
+    <div class="f" style="flex:.5"><label>Глубина</label><input id="depth" value="3" inputmode="numeric"></div>
+  </div>
+  <button id="go" onclick="connect()">Подключиться и обойти дерево</button>
+</div>
+
+<div id="status"></div>
+<div id="tree"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+// запомнить поля (кроме пароля)
+try{
+  for(const k of ['host','user','depth','port']){
+    const v = localStorage.getItem('mcs_'+k); if(v) $(k).value = v;
+  }
+}catch(e){}
+
+function connect(){
+  const host=$('host').value.trim(), port=parseInt($('port').value)||1911;
+  const user=$('user').value.trim(), pass=$('pass').value, depth=parseInt($('depth').value)||3;
+  if(!host){ setStatus('Укажите адрес станции','err'); return; }
+  try{
+    localStorage.setItem('mcs_host',host); localStorage.setItem('mcs_user',user);
+    localStorage.setItem('mcs_depth',depth); localStorage.setItem('mcs_port',port);
+  }catch(e){}
+  $('go').disabled=true; $('tree').innerHTML=''; setStatus('Подключаюсь к '+host+':'+port+' …');
+  if(typeof Fox==='undefined'){ setStatus('Нет моста Fox (открыто вне приложения)','err'); $('go').disabled=false; return; }
+  Fox.discover(host, port, user, pass, depth);
+}
+
+function setStatus(t,cls){ const s=$('status'); s.textContent=t; s.className=cls||''; }
+
+// вызывается из Java по завершении
+window.onFoxResult = function(jsonStr){
+  $('go').disabled=false;
+  let r; try{ r=JSON.parse(jsonStr); }catch(e){ setStatus('Битый ответ','err'); return; }
+  if(!r.ok){ setStatus(r.error||'Ошибка','err'); return; }
+  setStatus('✓ '+(r.station||'станция')+'  (v'+(r.version||'?')+')','ok');
+  $('tree').innerHTML='';
+  $('tree').appendChild(renderNode(r.tree));
+};
+
+function renderNode(n){
+  const li=document.createElement('li');
+  const row=document.createElement('div'); row.className='node';
+  const kids=n.children&&n.children.length;
+  const tw=document.createElement('span'); tw.className='tw'; tw.textContent=kids?'▾':'';
+  row.appendChild(tw);
+  const nm=document.createElement('span'); nm.className='nm'; nm.textContent=n.name; row.appendChild(nm);
+  if(n.type){ const ty=document.createElement('span'); ty.className='ty'; ty.textContent=n.type; row.appendChild(ty); }
+  if(n.value!=null){ const v=document.createElement('span'); v.className='val'; v.textContent=n.value; row.appendChild(v); }
+  li.appendChild(row);
+  if(kids){
+    const ul=document.createElement('ul');
+    for(const c of n.children) ul.appendChild(renderNode(c));
+    li.appendChild(ul);
+    tw.onclick=()=>{ li.classList.toggle('collapsed'); tw.textContent=li.classList.contains('collapsed')?'▸':'▾'; };
+  }
+  return li;
+}
+</script>
+</body>
+</html>

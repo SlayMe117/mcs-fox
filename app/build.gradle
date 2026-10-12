@@ -1,0 +1,29 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.avtc.mcsfox'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.avtc.mcsfox"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "0.1"
+    }
+
+    buildTypes {
+        debug {
+            // отладочная сборка подписывается дефолтным debug-ключом автоматически
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+}
